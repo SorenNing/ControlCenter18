@@ -116,6 +116,31 @@ static void C18BPrototypeOnController(id self) {
     if (!table) { C18Log(@"no table on %@", NSStringFromClass([self class])); return; }
     UIView *hv = table.tableHeaderView;
     C18Log(@"controller %@ header=%@", NSStringFromClass([self class]), hv ? @"exists" : @"nil");
+
+    // ---- 探针：打印作者控制器与 header 类的完整方法列表 ----
+    static BOOL probed = NO;
+    if (!probed) {
+        probed = YES;
+        for (NSString *clsName in @[@"C18PRootListController", @"C18PHeaderView"]) {
+            Class cls = NSClassFromString(clsName);
+            if (!cls) { C18Log(@"probe: %@ not found", clsName); continue; }
+            C18Log(@"probe: %@ methods:", clsName);
+            unsigned int mc = 0;
+            Method *methods = class_copyMethodList(cls, &mc);
+            for (unsigned int i = 0; i < mc; i++) {
+                C18Log(@"   -[%s %s]", [clsName UTF8String], sel_getName(method_getName(methods[i])));
+            }
+            free(methods);
+            // 类方法
+            unsigned int cc = 0;
+            Method *cms = class_copyMethodList(object_getClass(cls), &cc);
+            for (unsigned int i = 0; i < cc; i++) {
+                C18Log(@"   +[%s %s]", [clsName UTF8String], sel_getName(method_getName(cms[i])));
+            }
+            free(cms);
+        }
+    }
+
     if (hv) {
         C18BPrototypeAddRow(table, hv);
     } else {
