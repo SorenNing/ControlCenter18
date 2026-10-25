@@ -88,7 +88,8 @@ static void C18AppendOwnerGroup(id self) {
     if (link) [newList addObject:link];
     @try {
         [self setValue:newList forKey:@"_specifiers"];
-        [self reloadSpecifiers];
+        SEL rs = NSSelectorFromString(@"reloadSpecifiers");
+        if ([self respondsToSelector:rs]) ((void (*)(id, SEL))objc_msgSend)(self, rs);
     } @catch (__unused NSException *e) { C18Log(@"apply failed"); return; }
     C18Log(@"owner group appended (group=%@ link=%@)", group ? @"OK" : @"nil", link ? @"OK" : @"nil");
 }
