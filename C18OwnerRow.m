@@ -2,9 +2,9 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// ControlCenter18 设置页底部（最后一个分组下方）添加一行：
-// 圆形头像 + "Ning自用二改版"，点击跳转 GitHub 主页。
-// 实现：hook tableView:viewForFooterInSection: + heightForFooterInSection:（标准 UITableViewDelegate）
+// ControlCenter18 设置页最后添加一个标准设置项（cell）：
+// 头像图标 + "Ning自用二改版"，点击跳转 GitHub 主页。
+// 实现：hook 表格数据源（最后一个 section 的最后一行插入）。
 
 static NSString *const kOwnerRepoURL = @"https://github.com/SorenNing";
 static NSString *const kRowTitle = @"Ning自用二改版";
@@ -34,12 +34,10 @@ static UIImage *C18OwnerAvatar(void) {
         }
     }
     if (!bundle) { C18Log(@"avatar: no bundle (main=%@)", NSBundle.mainBundle.bundlePath); return nil; }
-    UIImage *img = [UIImage imageNamed:@"owner-avatar" inBundle:bundle compatibleWithTraitCollection:nil];
-    C18Log(@"avatar: %@ (bundle=%@)", img ? @"OK" : @"nil", bundle.bundlePath);
-    return img;
+    return [UIImage imageNamed:@"owner-avatar" inBundle:bundle compatibleWithTraitCollection:nil];
 }
 
-static void C18OwnerTapped(void) {
+static void C18OwnerOpen(void) {
     NSURL *url = [NSURL URLWithString:kOwnerRepoURL];
     if (url && @available(iOS 10.0, *)) {
         [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
@@ -47,82 +45,63 @@ static void C18OwnerTapped(void) {
     }
 }
 
-#pragma mark - footer 视图（单例复用）
+#pragma mark - 最后一行判定
 
-static UIView *C18OwnerFooterView(void) {
-    static UIView *footer;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        CGFloat width = UIScreen.mainScreen.bounds.size.width;
-        const CGFloat rowH = 46.0;
-        UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
-        row.frame = CGRectMake(16, 8, width - 32, rowH);
-        row.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *trait) {
-            return trait.userInterfaceStyle == UIUserInterfaceStyleDark
-                ? [UIColor colorWithWhite:0.13 alpha:1.0]
-                : [UIColor colorWithWhite:0.95 alpha:1.0];
-        }];
-        row.layer.cornerRadius = 12.0;
-        row.layer.masksToBounds = YES;
-        if (@available(iOS 14.0, *)) {
-            [row addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-                (void)action; C18OwnerTapped();
-            }] forControlEvents:UIControlEventTouchUpInside];
+static BOOL C18IsOwnerIndexPath(NSIndexPath *ip, id table, id controller) {
+    NSInteger sections = 0;
+    @try {
+        sections = ((NSInteger (*)(id, SEL, id))objc_msgSend)(controller, @selector(numberOfSectionsInTableView:), table);
+    } @catch (__unused NSException *e) { return NO; }
+    if (ip.section != sections - 1) return NO;
+    NSInteger rows = 0;
+    @try {
+        rows = ((NSInteger (*)(id, SEL, id, NSInteger))objc_msgSend)(
+            controller, @selector(tableView:numberOfRowsInSection:), table, ip.section);
+    } @catch (__unused NSException *e) { return NO; }
+    return ip.row == rows - 1;
+}
+
+#pragma mark - 数据源 hook
+
+static NSInteger (*orig_numberOfRows)(id, SEL, id, NSInteger);
+static NSInteger hook_numberOfRows(id self, SEL _cmd, id table, NSInteger section) {
+    NSInteger rows = orig_numberOfRows ? orig_numberOfRows(self, _cmd, table, section) : 0;
+    NSInteger sections = 0;
+    @try {
+        sections = ((NSInteger (*)(id, SEL, id))objc_msgSend)(self, @selector(numberOfSectionsInTableView:), table);
+    } @catch (__unused NSException *e) { return rows; }
+    if (section == sections - 1) return rows + 1; // 最后分组多一行
+    return rows;
+}
+
+static id (*orig_cellForRow)(id, SEL, id, id);
+static id hook_cellForRow(id self, SEL _cmd, id table, NSIndexPath *ip) {
+    if (C18IsOwnerIndexPath(ip, table, self)) {
+        NSString *reuse = @"c18OwnerCell";
+        UITableViewCell *cell = [table dequeueReusableCellWithIdentifier:reuse];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuse];
+            cell.imageView.layer.cornerRadius = 13.0;
+            cell.imageView.layer.masksToBounds = YES;
+            cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
-
-        UIImageView *iv = [[UIImageView alloc] initWithImage:C18OwnerAvatar()];
-        iv.contentMode = UIViewContentModeScaleAspectFill;
-        iv.layer.cornerRadius = 13.0;
-        iv.layer.masksToBounds = YES;
-        iv.frame = CGRectMake(12, (rowH - 26) / 2.0, 26, 26);
-        [row addSubview:iv];
-
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(48, 0, row.bounds.size.width - 96, rowH)];
-        label.text = kRowTitle;
-        label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-        label.textColor = UIColor.labelColor;
-        label.userInteractionEnabled = NO;
-        [row addSubview:label];
-
-        UIImageView *chev = [[UIImageView alloc] initWithImage:
-            [UIImage systemImageNamed:@"arrow.up.right.square"]];
-        chev.tintColor = UIColor.secondaryLabelColor;
-        chev.contentMode = UIViewContentModeScaleAspectFit;
-        chev.frame = CGRectMake(row.bounds.size.width - 34, (rowH - 15) / 2.0, 15, 15);
-        chev.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-        [row addSubview:chev];
-
-        UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, rowH + 16)];
-        [container addSubview:row];
-        footer = container;
-        C18Log(@"footer view built");
-    });
-    return footer;
+        cell.textLabel.text = kRowTitle;
+        cell.imageView.image = C18OwnerAvatar();
+        [cell.imageView sizeToFit];
+        return cell;
+    }
+    return orig_cellForRow ? orig_cellForRow(self, _cmd, table, ip) : nil;
 }
 
-#pragma mark - delegate hook
-
-static id (*orig_viewForFooter)(id, SEL, id, NSInteger);
-static id hook_viewForFooter(id self, SEL _cmd, id table, NSInteger section) {
-    id v = orig_viewForFooter ? orig_viewForFooter(self, _cmd, table, section) : nil;
-    if (v) return v;
-    NSInteger last = 0;
-    @try {
-        last = ((NSInteger (*)(id, SEL, id))objc_msgSend)(self, @selector(numberOfSectionsInTableView:), table) - 1;
-    } @catch (__unused NSException *e) { return nil; }
-    if (section == last) return C18OwnerFooterView();
-    return nil;
-}
-
-static CGFloat (*orig_heightForFooter)(id, SEL, id, NSInteger);
-static CGFloat hook_heightForFooter(id self, SEL _cmd, id table, NSInteger section) {
-    CGFloat h = orig_heightForFooter ? orig_heightForFooter(self, _cmd, table, section) : 0;
-    NSInteger last = 0;
-    @try {
-        last = ((NSInteger (*)(id, SEL, id))objc_msgSend)(self, @selector(numberOfSectionsInTableView:), table) - 1;
-    } @catch (__unused NSException *e) { return h; }
-    if (section == last && h < 62) return 62.0;
-    return h;
+static void (*orig_didSelect)(id, SEL, id, id);
+static void hook_didSelect(id self, SEL _cmd, id table, NSIndexPath *ip) {
+    if (C18IsOwnerIndexPath(ip, table, self)) {
+        [table deselectRowAtIndexPath:ip animated:YES];
+        C18OwnerOpen();
+        return;
+    }
+    if (orig_didSelect) orig_didSelect(self, _cmd, table, ip);
 }
 
 #pragma mark - hook 安装
@@ -130,31 +109,29 @@ static CGFloat hook_heightForFooter(id self, SEL _cmd, id table, NSInteger secti
 static void C18Install(void) {
     Class cls = NSClassFromString(@"C18PRootListController");
     if (!cls) { C18Log(@"class not found"); return; }
+    if (orig_numberOfRows) { C18Log(@"already hooked"); return; }
+
     Method m;
 
-    m = class_getInstanceMethod(cls, @selector(tableView:viewForFooterInSection:));
-    {
-        IMP orig = m ? method_getImplementation(m) : NULL;
-        if (!class_addMethod(cls, @selector(tableView:viewForFooterInSection:),
-                             (IMP)hook_viewForFooter, "v@:@q")) {
-            Method own = class_getInstanceMethod(cls, @selector(tableView:viewForFooterInSection:));
-            orig = method_getImplementation(own);
-            method_setImplementation(own, (IMP)hook_viewForFooter);
-        }
-        orig_viewForFooter = (id (*)(id, SEL, id, NSInteger))orig;
+    m = class_getInstanceMethod(cls, @selector(tableView:numberOfRowsInSection:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        class_addMethod(cls, @selector(tableView:numberOfRowsInSection:), (IMP)hook_numberOfRows, method_getTypeEncoding(m));
+        orig_numberOfRows = (NSInteger (*)(id, SEL, id, NSInteger))orig;
     }
-    m = class_getInstanceMethod(cls, @selector(tableView:heightForFooterInSection:));
-    {
-        IMP orig = m ? method_getImplementation(m) : NULL;
-        if (!class_addMethod(cls, @selector(tableView:heightForFooterInSection:),
-                             (IMP)hook_heightForFooter, "d@:@q")) {
-            Method own = class_getInstanceMethod(cls, @selector(tableView:heightForFooterInSection:));
-            orig = method_getImplementation(own);
-            method_setImplementation(own, (IMP)hook_heightForFooter);
-        }
-        orig_heightForFooter = (CGFloat (*)(id, SEL, id, NSInteger))orig;
+    m = class_getInstanceMethod(cls, @selector(tableView:cellForRowAtIndexPath:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        class_addMethod(cls, @selector(tableView:cellForRowAtIndexPath:), (IMP)hook_cellForRow, method_getTypeEncoding(m));
+        orig_cellForRow = (id (*)(id, SEL, id, id))orig;
     }
-    C18Log(@"footer-delegate hooked");
+    m = class_getInstanceMethod(cls, @selector(tableView:didSelectRowAtIndexPath:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        class_addMethod(cls, @selector(tableView:didSelectRowAtIndexPath:), (IMP)hook_didSelect, method_getTypeEncoding(m));
+        orig_didSelect = (void (*)(id, SEL, id, id))orig;
+    }
+    C18Log(@"datasource hooked");
 }
 
 __attribute__((constructor)) static void C18Init(void) {
