@@ -201,6 +201,13 @@ static void C18Install(void) {
 
 __attribute__((constructor)) static void C18Init(void) {
     @autoreleasepool {
+        // 注入证明：写共享偏好标记（Filza 可读 /var/mobile/Library/Preferences/com.minis.c18ownerrow.plist）
+        @try {
+            CFPreferencesSetAppValue(CFSTR("probe_time"),
+                (__bridge CFPropertyListRef)[NSNumber numberWithDouble:CACurrentMediaTime()],
+                CFSTR("com.minis.c18ownerrow"));
+            CFPreferencesAppSynchronize(CFSTR("com.minis.c18ownerrow"));
+        } @catch (__unused NSException *e) {}
         C18Log(@"C18OwnerRow loaded, bundle=%@", NSBundle.mainBundle.bundleIdentifier);
         dispatch_async(dispatch_get_main_queue(), ^{
             // 多次尝试：设置 bundle 的 dylib 注入晚于 launch
