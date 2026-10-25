@@ -7,6 +7,21 @@
 
 static NSString *const kOwnerRepoURL = @"https://github.com/SorenNing";
 
+#pragma mark - 日志
+
+static void C18Log(NSString *fmt, ...) {
+    @autoreleasepool {
+        va_list args; va_start(args, fmt);
+        NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+        va_end(args);
+        NSString *path = @"/var/mobile/Documents/C18OwnerRow.log";
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (fh) { [fh seekToEndOfFile]; [fh writeData:[[msg stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
+    }
+}
+
 #pragma mark - 私有声明
 
 @interface PSListController : UIViewController
@@ -20,8 +35,10 @@ static NSString *const kOwnerRepoURL = @"https://github.com/SorenNing";
 
 static UIImage *C18OwnerAvatar(void) {
     NSBundle *bundle = [NSBundle bundleWithPath:@"/Library/PreferenceBundles/ControlCenter18Prefs.bundle"];
-    if (!bundle) return nil;
-    return [UIImage imageNamed:@"owner-avatar" inBundle:bundle compatibleWithTraitCollection:nil];
+    if (!bundle) { C18Log(@"no prefs bundle"); return nil; }
+    UIImage *img = [UIImage imageNamed:@"owner-avatar" inBundle:bundle compatibleWithTraitCollection:nil];
+    C18Log(@"avatar img: %@", img ? @"OK" : @"nil");
+    return img;
 }
 
 static void C18OwnerTapped(void) {
@@ -29,6 +46,7 @@ static void C18OwnerTapped(void) {
     if (url) {
         if (@available(iOS 10.0, *)) {
             [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+            C18Log(@"open url");
         }
     }
 }
@@ -36,9 +54,10 @@ static void C18OwnerTapped(void) {
 #pragma mark - 加行
 
 static void C18BPrototypeAddRow(UITableView *table, UIView *headerView) {
-    if (!table || !headerView) return;
-    if (objc_getAssociatedObject(headerView, "c18OwnerRow")) return;
+    if (!table || !headerView) { C18Log(@"addRow: skip (table/header nil)"); return; }
+    if (objc_getAssociatedObject(headerView, "c18OwnerRow")) { C18Log(@"addRow: already"); return; }
     objc_setAssociatedObject(headerView, "c18OwnerRow", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    C18Log(@"addRow: header h=%.1f w=%.1f", headerView.bounds.size.height, headerView.bounds.size.width);
 
     const CGFloat rowHeight = 46.0;
     CGFloat width = table.bounds.size.width;
@@ -48,12 +67,10 @@ static void C18BPrototypeAddRow(UITableView *table, UIView *headerView) {
     UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, hf.size.height + rowHeight)];
     container.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
-    // 原 header 放顶部，不动它
     headerView.frame = CGRectMake(0, 0, width, hf.size.height);
     headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [container addSubview:headerView];
 
-    // 新行（整行是一个按钮）
     UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
     row.frame = CGRectMake(0, hf.size.height, width, rowHeight);
     row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
@@ -90,6 +107,25 @@ static void C18BPrototypeAddRow(UITableView *table, UIView *headerView) {
 
     [container addSubview:row];
     table.tableHeaderView = container;
+    C18Log(@"addRow: done");
+}
+
+static void C18BPrototypeOnController(id self) {
+    UITableView *table = nil;
+    @try { table = [self valueForKey:@"table"]; } @catch (__unused NSException *e) {}
+    if (!table) { C18Log(@"no table on %@", NSStringFromClass([self class])); return; }
+    UIView *hv = table.tableHeaderView;
+    C18Log(@"controller %@ header=%@", NSStringFromClass([self class]), hv ? @"exists" : @"nil");
+    if (hv) {
+        C18BPrototypeAddRow(table, hv);
+    } else {
+        // 稍后再试（header 可能延迟设置）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+            dispatch_get_main_queue(), ^{
+                UIView *hv2 = table.tableHeaderView;
+                if (hv2) C18BPrototypeAddRow(table, hv2);
+            });
+    }
 }
 
 #pragma mark - hook
@@ -97,31 +133,56 @@ static void C18BPrototypeAddRow(UITableView *table, UIView *headerView) {
 static void (*orig_C18_viewDidLoad)(id, SEL);
 static void hook_C18_viewDidLoad(id self, SEL _cmd) {
     if (orig_C18_viewDidLoad) orig_C18_viewDidLoad(self, _cmd);
-    @try {
-        UITableView *table = [self valueForKey:@"table"];
-        UIView *hv = table.tableHeaderView;
-        if (hv) C18BPrototypeAddRow(table, hv);
-    } @catch (__unused NSException *e) {}
+    C18Log(@"viewDidLoad fired");
+    C18BPrototypeOnController(self);
+}
+
+static void (*orig_C18_viewDidAppear)(id, SEL, BOOL);
+static void hook_C18_viewDidAppear(id self, SEL _cmd, BOOL animated) {
+    if (orig_C18_viewDidAppear) orig_C18_viewDidAppear(self, _cmd, animated);
+    C18Log(@"viewDidAppear fired");
+    C18BPrototypeOnController(self);
 }
 
 static void C18Install(void) {
     Class cls = NSClassFromString(@"C18PRootListController");
-    if (!cls) return;
-    Method m = class_getInstanceMethod(cls, @selector(viewDidLoad));
-    if (!m) return;
-    IMP orig = method_getImplementation(m);
-    if (!class_addMethod(cls, @selector(viewDidLoad), (IMP)hook_C18_viewDidLoad, method_getTypeEncoding(m))) {
-        Method own = class_getInstanceMethod(cls, @selector(viewDidLoad));
-        if (own) {
+    if (!cls) { C18Log(@"class not found"); return; }
+    C18Log(@"installing hooks on %@", NSStringFromClass(cls));
+    Method m;
+
+    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        if (!class_addMethod(cls, @selector(viewDidLoad), (IMP)hook_C18_viewDidLoad, method_getTypeEncoding(m))) {
+            Method own = class_getInstanceMethod(cls, @selector(viewDidLoad));
             orig = method_getImplementation(own);
             method_setImplementation(own, (IMP)hook_C18_viewDidLoad);
         }
+        orig_C18_viewDidLoad = (void (*)(id, SEL))orig;
+        C18Log(@"viewDidLoad hooked");
     }
-    orig_C18_viewDidLoad = (void (*)(id, SEL))orig;
+    m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        if (!class_addMethod(cls, @selector(viewDidAppear:), (IMP)hook_C18_viewDidAppear, method_getTypeEncoding(m))) {
+            Method own = class_getInstanceMethod(cls, @selector(viewDidAppear:));
+            orig = method_getImplementation(own);
+            method_setImplementation(own, (IMP)hook_C18_viewDidAppear);
+        }
+        orig_C18_viewDidAppear = (void (*)(id, SEL, BOOL))orig;
+        C18Log(@"viewDidAppear hooked");
+    }
 }
 
 __attribute__((constructor)) static void C18Init(void) {
     @autoreleasepool {
-        dispatch_async(dispatch_get_main_queue(), ^{ C18Install(); });
+        C18Log(@"C18OwnerRow loaded, bundle=%@", NSBundle.mainBundle.bundleIdentifier);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // 多次尝试：设置 bundle 的 dylib 注入晚于 launch
+            for (int i = 0; i < 6; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * (i + 1) * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{ C18Install(); });
+            }
+        });
     }
 }
