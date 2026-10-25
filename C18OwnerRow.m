@@ -2,10 +2,12 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// 在 ControlCenter18 设置页的 tableHeaderView（作者头像横幅）正下方
-// 追加一行：圆形头像 + "Ning自用二改版"，点击跳转 GitHub 主页。
+// 在 ControlCenter18 设置页底部追加一行：
+// 圆形头像 + "Ning自用二改版"，点击跳转 GitHub 主页。
+// 实现：hook C18PRootListController -specifiers，末尾追加 PSSpecifier(PSLinkCell)。
 
 static NSString *const kOwnerRepoURL = @"https://github.com/SorenNing";
+static NSString *const kRowTitle = @"Ning自用二改版";
 
 #pragma mark - 日志
 
@@ -22,201 +24,74 @@ static void C18Log(NSString *fmt, ...) {
     }
 }
 
-#pragma mark - 私有声明
-
-@interface PSListController : UIViewController
-@property(nonatomic, strong) UITableView *table;
-@end
-
-@interface C18PRootListController : PSListController
-@end
-
 #pragma mark - 头像
 
 static UIImage *C18OwnerAvatar(void) {
-    // RootHide 下硬编码路径找不到 bundle：改从运行类反查
     NSBundle *bundle = [NSBundle bundleForClass:NSClassFromString(@"C18PRootListController")];
     if (!bundle) {
         for (NSBundle *bb in [NSBundle allBundles]) {
             if ([bb.bundlePath containsString:@"ControlCenter18Prefs"]) { bundle = bb; break; }
         }
     }
-    if (!bundle) { C18Log(@"avatar: no bundle (path=%@)", NSBundle.mainBundle.bundlePath); return nil; }
-    C18Log(@"avatar: bundle=%@", bundle.bundlePath);
+    if (!bundle) { C18Log(@"avatar: no bundle (main=%@)", NSBundle.mainBundle.bundlePath); return nil; }
     return [UIImage imageNamed:@"owner-avatar" inBundle:bundle compatibleWithTraitCollection:nil];
 }
 
-// 递归打印视图树，定位作者头像
-static void C18DumpTree(UIView *view, int depth) {
-    NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
-    NSString *cls = NSStringFromClass(view.class);
-    CGRect f = view.frame;
-    C18Log(@"%@%@ f=%.0f,%.0f %.0fx%.0f alpha=%.2f hidden=%d",
-           indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, view.alpha, view.hidden);
-    for (UIView *sub in view.subviews) C18DumpTree(sub, depth + 1);
-}
+#pragma mark - specifiers hook
 
-static void C18OwnerTapped(void) {
-    NSURL *url = [NSURL URLWithString:kOwnerRepoURL];
-    if (url) {
-        if (@available(iOS 10.0, *)) {
-            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-            C18Log(@"open url");
+static NSArray *(*orig_specifiers)(id, SEL);
+static NSArray *hook_specifiers(id self, SEL _cmd) {
+    NSArray *list = orig_specifiers ? orig_specifiers(self, _cmd) : nil;
+    if (![list isKindOfClass:NSArray.class]) return list;
+
+    // 防重复（PSListController 可能多次调用）
+    for (id sp in list) {
+        id name = [sp valueForKey:@"name"];
+        if ([name isKindOfClass:NSString.class] && [name isEqualToString:kRowTitle]) return list;
+    }
+
+    Class psc = NSClassFromString(@"PSSpecifier");
+    if (!psc) return list;
+    id sp = nil;
+    @try {
+        sp = ((id (*)(id, SEL, id, id, id, id, id, NSInteger, id))objc_msgSend)(
+            psc, @selector(preferenceSpecifierNamed:target:set:get:detail:cell:edit:),
+            kRowTitle, self, nil, nil, nil, 1 /* PSLinkCell */, nil);
+        if (sp) {
+            UIImage *avatar = C18OwnerAvatar();
+            if (avatar) [sp setProperty:avatar forKey:@"iconImage"];
+            [sp setProperty:kOwnerRepoURL forKey:@"url"];
+            [sp setProperty:@YES forKey:@"isLink"];
+            C18Log(@"specifier added: %@, avatar=%@", kRowTitle, avatar ? @"OK" : @"nil");
         }
+    } @catch (__unused NSException *e) {
+        C18Log(@"specifier create exception");
     }
+    if (!sp) return list;
+    NSMutableArray *m = [list mutableCopy];
+    [m addObject:sp];
+    return [m copy];
 }
 
-#pragma mark - 加行
-
-static void C18BPrototypeAddRow(UITableView *table, UIView *headerView) {
-    if (!table || !headerView) { C18Log(@"addRow: skip (table/header nil)"); return; }
-    if (objc_getAssociatedObject(headerView, "c18OwnerRow")) { C18Log(@"addRow: already"); return; }
-    objc_setAssociatedObject(headerView, "c18OwnerRow", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    C18Log(@"addRow: header h=%.1f w=%.1f", headerView.bounds.size.height, headerView.bounds.size.width);
-
-    const CGFloat rowHeight = 46.0;
-    CGFloat width = table.bounds.size.width;
-    if (width < 1) width = UIScreen.mainScreen.bounds.size.width;
-
-    CGRect hf = headerView.frame;
-    UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, hf.size.height + rowHeight)];
-    container.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-
-    headerView.frame = CGRectMake(0, 0, width, hf.size.height);
-    headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [container addSubview:headerView];
-
-    UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
-    row.frame = CGRectMake(0, hf.size.height, width, rowHeight);
-    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    row.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    row.userInteractionEnabled = YES;
-    if (@available(iOS 14.0, *)) {
-        [row addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-            (void)action;
-            C18OwnerTapped();
-        }] forControlEvents:UIControlEventTouchUpInside];
-    }
-
-    UIImageView *iv = [[UIImageView alloc] initWithImage:C18OwnerAvatar()];
-    iv.contentMode = UIViewContentModeScaleAspectFill;
-    iv.layer.cornerRadius = 13.0;
-    iv.layer.masksToBounds = YES;
-    iv.frame = CGRectMake(16, (rowHeight - 26) / 2.0, 26, 26);
-    [row addSubview:iv];
-
-    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(52, 0, width - 92, rowHeight)];
-    label.text = @"Ning自用二改版";
-    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    label.textColor = UIColor.labelColor;
-    label.userInteractionEnabled = NO;
-    [row addSubview:label];
-
-    UIImageView *chev = [[UIImageView alloc] initWithImage:
-        [UIImage systemImageNamed:@"arrow.up.right.square"]];
-    chev.tintColor = UIColor.secondaryLabelColor;
-    chev.contentMode = UIViewContentModeScaleAspectFit;
-    chev.frame = CGRectMake(width - 36, (rowHeight - 15) / 2.0, 15, 15);
-    chev.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-    [row addSubview:chev];
-
-    [container addSubview:row];
-    table.tableHeaderView = container;
-    C18Log(@"addRow: done");
-}
-
-static void C18BPrototypeOnController(id self) {
-    UITableView *table = nil;
-    @try { table = [self valueForKey:@"table"]; } @catch (__unused NSException *e) {}
-    if (!table) { C18Log(@"no table on %@", NSStringFromClass([self class])); return; }
-    UIView *hv = table.tableHeaderView;
-    C18Log(@"controller %@ header=%@", NSStringFromClass([self class]), hv ? @"exists" : @"nil");
-
-    // ---- 探针：打印作者控制器与 header 类的完整方法列表 ----
-    static BOOL probed = NO;
-    if (!probed) {
-        probed = YES;
-        for (NSString *clsName in @[@"C18PRootListController", @"C18PHeaderView"]) {
-            Class cls = NSClassFromString(clsName);
-            if (!cls) { C18Log(@"probe: %@ not found", clsName); continue; }
-            C18Log(@"probe: %@ methods:", clsName);
-            unsigned int mc = 0;
-            Method *methods = class_copyMethodList(cls, &mc);
-            for (unsigned int i = 0; i < mc; i++) {
-                C18Log(@"   -[%s %s]", [clsName UTF8String], sel_getName(method_getName(methods[i])));
-            }
-            free(methods);
-            // 类方法
-            unsigned int cc = 0;
-            Method *cms = class_copyMethodList(object_getClass(cls), &cc);
-            for (unsigned int i = 0; i < cc; i++) {
-                C18Log(@"   +[%s %s]", [clsName UTF8String], sel_getName(method_getName(cms[i])));
-            }
-            free(cms);
-        }
-    }
-
-    if (hv) {
-        C18BPrototypeAddRow(table, hv);
-    } else {
-        // 稍后再试（header 可能延迟设置）
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{
-                UIView *hv2 = table.tableHeaderView;
-                if (hv2) C18BPrototypeAddRow(table, hv2);
-            });
-    }
-}
-
-#pragma mark - hook
-
-static void (*orig_C18_viewDidLoad)(id, SEL);
-static void hook_C18_viewDidLoad(id self, SEL _cmd) {
-    if (orig_C18_viewDidLoad) orig_C18_viewDidLoad(self, _cmd);
-    C18Log(@"viewDidLoad fired");
-    C18BPrototypeOnController(self);
-}
-
-static void (*orig_C18_viewDidAppear)(id, SEL, BOOL);
-static void hook_C18_viewDidAppear(id self, SEL _cmd, BOOL animated) {
-    if (orig_C18_viewDidAppear) orig_C18_viewDidAppear(self, _cmd, animated);
-    C18Log(@"viewDidAppear fired");
-    C18BPrototypeOnController(self);
-}
+#pragma mark - hook 安装
 
 static void C18Install(void) {
     Class cls = NSClassFromString(@"C18PRootListController");
     if (!cls) { C18Log(@"class not found"); return; }
-    C18Log(@"installing hooks on %@", NSStringFromClass(cls));
-    Method m;
-
-    m = class_getInstanceMethod(cls, @selector(viewDidLoad));
-    if (m) {
-        IMP orig = method_getImplementation(m);
-        if (!class_addMethod(cls, @selector(viewDidLoad), (IMP)hook_C18_viewDidLoad, method_getTypeEncoding(m))) {
-            Method own = class_getInstanceMethod(cls, @selector(viewDidLoad));
-            orig = method_getImplementation(own);
-            method_setImplementation(own, (IMP)hook_C18_viewDidLoad);
-        }
-        orig_C18_viewDidLoad = (void (*)(id, SEL))orig;
-        C18Log(@"viewDidLoad hooked");
+    Method m = class_getInstanceMethod(cls, @selector(specifiers));
+    if (!m) { C18Log(@"no -specifiers"); return; }
+    IMP orig = method_getImplementation(m);
+    if (!class_addMethod(cls, @selector(specifiers), (IMP)hook_specifiers, method_getTypeEncoding(m))) {
+        Method own = class_getInstanceMethod(cls, @selector(specifiers));
+        orig = method_getImplementation(own);
+        method_setImplementation(own, (IMP)hook_specifiers);
     }
-    m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
-    if (m) {
-        IMP orig = method_getImplementation(m);
-        if (!class_addMethod(cls, @selector(viewDidAppear:), (IMP)hook_C18_viewDidAppear, method_getTypeEncoding(m))) {
-            Method own = class_getInstanceMethod(cls, @selector(viewDidAppear:));
-            orig = method_getImplementation(own);
-            method_setImplementation(own, (IMP)hook_C18_viewDidAppear);
-        }
-        orig_C18_viewDidAppear = (void (*)(id, SEL, BOOL))orig;
-        C18Log(@"viewDidAppear hooked");
-    }
+    orig_specifiers = (NSArray *(*)(id, SEL))orig;
+    C18Log(@"specifiers hooked");
 }
 
 __attribute__((constructor)) static void C18Init(void) {
     @autoreleasepool {
-        // 注入证明：写共享偏好标记（Filza 可读 /var/mobile/Library/Preferences/com.minis.c18ownerrow.plist）
         @try {
             CFPreferencesSetAppValue(CFSTR("probe_time"),
                 (__bridge CFPropertyListRef)[NSNumber numberWithDouble:CACurrentMediaTime()],
@@ -225,7 +100,6 @@ __attribute__((constructor)) static void C18Init(void) {
         } @catch (__unused NSException *e) {}
         C18Log(@"C18OwnerRow loaded, bundle=%@", NSBundle.mainBundle.bundleIdentifier);
         dispatch_async(dispatch_get_main_queue(), ^{
-            // 多次尝试：设置 bundle 的 dylib 注入晚于 launch
             for (int i = 0; i < 6; i++) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * (i + 1) * NSEC_PER_SEC)),
                     dispatch_get_main_queue(), ^{ C18Install(); });
