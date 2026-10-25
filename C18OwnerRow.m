@@ -89,8 +89,9 @@ static void C18AppendOwnerGroup(id self) {
     if (link) [newList addObject:link];
     @try {
         [self setValue:newList forKey:@"_specifiers"];
-        SEL rs = NSSelectorFromString(@"reloadSpecifiers");
-        if ([self respondsToSelector:rs]) ((void (*)(id, SEL))objc_msgSend)(self, rs);
+        // 不调 reloadSpecifiers（会被 pending 流程覆盖），直接刷新表格渲染新分组
+        UITableView *table = [self valueForKey:@"table"];
+        if (table) [table reloadData];
     } @catch (__unused NSException *e) { C18Log(@"apply failed"); return; }
     C18Log(@"owner group appended (group=%@ link=%@)", group ? @"OK" : @"nil", link ? @"OK" : @"nil");
 }
