@@ -34,11 +34,26 @@ static void C18Log(NSString *fmt, ...) {
 #pragma mark - 头像
 
 static UIImage *C18OwnerAvatar(void) {
-    NSBundle *bundle = [NSBundle bundleWithPath:@"/Library/PreferenceBundles/ControlCenter18Prefs.bundle"];
-    if (!bundle) { C18Log(@"no prefs bundle"); return nil; }
-    UIImage *img = [UIImage imageNamed:@"owner-avatar" inBundle:bundle compatibleWithTraitCollection:nil];
-    C18Log(@"avatar img: %@", img ? @"OK" : @"nil");
-    return img;
+    // RootHide 下硬编码路径找不到 bundle：改从运行类反查
+    NSBundle *bundle = [NSBundle bundleForClass:NSClassFromString(@"C18PRootListController")];
+    if (!bundle) {
+        for (NSBundle *bb in [NSBundle allBundles]) {
+            if ([bb.bundlePath containsString:@"ControlCenter18Prefs"]) { bundle = bb; break; }
+        }
+    }
+    if (!bundle) { C18Log(@"avatar: no bundle (path=%@)", NSBundle.mainBundle.bundlePath); return nil; }
+    C18Log(@"avatar: bundle=%@", bundle.bundlePath);
+    return [UIImage imageNamed:@"owner-avatar" inBundle:bundle compatibleWithTraitCollection:nil];
+}
+
+// 递归打印视图树，定位作者头像
+static void C18DumpTree(UIView *view, int depth) {
+    NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
+    NSString *cls = NSStringFromClass(view.class);
+    CGRect f = view.frame;
+    C18Log(@"%@%@ f=%.0f,%.0f %.0fx%.0f alpha=%.2f hidden=%d",
+           indent, cls, f.origin.x, f.origin.y, f.size.width, f.size.height, view.alpha, view.hidden);
+    for (UIView *sub in view.subviews) C18DumpTree(sub, depth + 1);
 }
 
 static void C18OwnerTapped(void) {
