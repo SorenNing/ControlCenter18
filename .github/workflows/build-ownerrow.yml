@@ -14,7 +14,7 @@ jobs:
       - run: |
           set -euo pipefail
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
-          clang -c -fobjc-arc -target arm64-apple-ios15.0 -isysroot "$SDK" \
+          clang -c -fobjc-arc -target arm64-apple-ios15.0 -arch arm64e -isysroot "$SDK" \
                 C18OwnerRow.m -o C18OwnerRow.o
           ld -arch arm64e -dylib -platform_version ios 15.0 16.5 -syslibroot "$SDK" \
              -install_name /Library/MobileSubstrate/DynamicLibraries/C18OwnerRow.dylib \
