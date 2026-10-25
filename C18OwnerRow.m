@@ -2,8 +2,9 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// ControlCenter18 设置页底部追加一行（tableFooterView）：
+// ControlCenter18 设置页底部（最后一个分组下方）添加一行：
 // 圆形头像 + "Ning自用二改版"，点击跳转 GitHub 主页。
+// 实现：hook tableView:viewForFooterInSection: + heightForFooterInSection:（标准 UITableViewDelegate）
 
 static NSString *const kOwnerRepoURL = @"https://github.com/SorenNing";
 static NSString *const kRowTitle = @"Ning自用二改版";
@@ -46,79 +47,114 @@ static void C18OwnerTapped(void) {
     }
 }
 
-#pragma mark - 底部行
+#pragma mark - footer 视图（单例复用）
 
-static void C18BSetupFooter(id panel) {
-    static const char kKey = 0;
-    if (objc_getAssociatedObject(panel, &kKey)) { C18Log(@"footer: already"); return; }
-    objc_setAssociatedObject(panel, &kKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    C18Log(@"footer setup for %@", NSStringFromClass([panel class]));
+static UIView *C18OwnerFooterView(void) {
+    static UIView *footer;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        CGFloat width = UIScreen.mainScreen.bounds.size.width;
+        const CGFloat rowH = 46.0;
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
+        row.frame = CGRectMake(16, 8, width - 32, rowH);
+        row.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *trait) {
+            return trait.userInterfaceStyle == UIUserInterfaceStyleDark
+                ? [UIColor colorWithWhite:0.13 alpha:1.0]
+                : [UIColor colorWithWhite:0.95 alpha:1.0];
+        }];
+        row.layer.cornerRadius = 12.0;
+        row.layer.masksToBounds = YES;
+        if (@available(iOS 14.0, *)) {
+            [row addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+                (void)action; C18OwnerTapped();
+            }] forControlEvents:UIControlEventTouchUpInside];
+        }
 
-    UITableView *table = nil;
-    @try { table = [panel valueForKey:@"table"]; } @catch (__unused NSException *e) {}
-    if (!table) { C18Log(@"footer: no table"); return; }
+        UIImageView *iv = [[UIImageView alloc] initWithImage:C18OwnerAvatar()];
+        iv.contentMode = UIViewContentModeScaleAspectFill;
+        iv.layer.cornerRadius = 13.0;
+        iv.layer.masksToBounds = YES;
+        iv.frame = CGRectMake(12, (rowH - 26) / 2.0, 26, 26);
+        [row addSubview:iv];
 
-    CGFloat width = table.bounds.size.width > 1 ? table.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
-    const CGFloat rowH = 46.0;
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(48, 0, row.bounds.size.width - 96, rowH)];
+        label.text = kRowTitle;
+        label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+        label.textColor = UIColor.labelColor;
+        label.userInteractionEnabled = NO;
+        [row addSubview:label];
 
-    UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
-    row.frame = CGRectMake(0, 0, width, rowH);
-    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    row.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    if (@available(iOS 14.0, *)) {
-        [row addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-            (void)action; C18OwnerTapped();
-        }] forControlEvents:UIControlEventTouchUpInside];
-    }
+        UIImageView *chev = [[UIImageView alloc] initWithImage:
+            [UIImage systemImageNamed:@"arrow.up.right.square"]];
+        chev.tintColor = UIColor.secondaryLabelColor;
+        chev.contentMode = UIViewContentModeScaleAspectFit;
+        chev.frame = CGRectMake(row.bounds.size.width - 34, (rowH - 15) / 2.0, 15, 15);
+        chev.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        [row addSubview:chev];
 
-    UIImage *avatar = C18OwnerAvatar();
-    UIImageView *iv = [[UIImageView alloc] initWithImage:avatar];
-    iv.contentMode = UIViewContentModeScaleAspectFill;
-    iv.layer.cornerRadius = 13.0;
-    iv.layer.masksToBounds = YES;
-    iv.frame = CGRectMake(16, (rowH - 26) / 2.0, 26, 26);
-    [row addSubview:iv];
-
-    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(52, 0, width - 92, rowH)];
-    label.text = kRowTitle;
-    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    label.textColor = UIColor.labelColor;
-    label.userInteractionEnabled = NO;
-    [row addSubview:label];
-
-    UIImageView *chev = [[UIImageView alloc] initWithImage:
-        [UIImage systemImageNamed:@"arrow.up.right.square"]];
-    chev.tintColor = UIColor.secondaryLabelColor;
-    chev.contentMode = UIViewContentModeScaleAspectFit;
-    chev.frame = CGRectMake(width - 36, (rowH - 15) / 2.0, 15, 15);
-    chev.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
-    [row addSubview:chev];
-
-    table.tableFooterView = row;
-    C18Log(@"footer set (h=%.1f, avatar=%@)", rowH, avatar ? @"OK" : @"nil");
+        UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, rowH + 16)];
+        [container addSubview:row];
+        footer = container;
+        C18Log(@"footer view built");
+    });
+    return footer;
 }
 
-#pragma mark - hook
+#pragma mark - delegate hook
 
-static void (*orig_C18_viewDidAppear)(id, SEL, BOOL);
-static void hook_C18_viewDidAppear(id self, SEL _cmd, BOOL animated) {
-    if (orig_C18_viewDidAppear) orig_C18_viewDidAppear(self, _cmd, animated);
-    C18BSetupFooter(self);
+static id (*orig_viewForFooter)(id, SEL, id, NSInteger);
+static id hook_viewForFooter(id self, SEL _cmd, id table, NSInteger section) {
+    id v = orig_viewForFooter ? orig_viewForFooter(self, _cmd, table, section) : nil;
+    if (v) return v;
+    NSInteger last = 0;
+    @try {
+        last = ((NSInteger (*)(id, SEL, id))objc_msgSend)(self, @selector(numberOfSectionsInTableView:), table) - 1;
+    } @catch (__unused NSException *e) { return nil; }
+    if (section == last) return C18OwnerFooterView();
+    return nil;
 }
+
+static CGFloat (*orig_heightForFooter)(id, SEL, id, NSInteger);
+static CGFloat hook_heightForFooter(id self, SEL _cmd, id table, NSInteger section) {
+    CGFloat h = orig_heightForFooter ? orig_heightForFooter(self, _cmd, table, section) : 0;
+    NSInteger last = 0;
+    @try {
+        last = ((NSInteger (*)(id, SEL, id))objc_msgSend)(self, @selector(numberOfSectionsInTableView:), table) - 1;
+    } @catch (__unused NSException *e) { return h; }
+    if (section == last && h < 62) return 62.0;
+    return h;
+}
+
+#pragma mark - hook 安装
 
 static void C18Install(void) {
     Class cls = NSClassFromString(@"C18PRootListController");
     if (!cls) { C18Log(@"class not found"); return; }
-    Method m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
-    if (!m) return;
-    IMP orig = method_getImplementation(m);
-    if (!class_addMethod(cls, @selector(viewDidAppear:), (IMP)hook_C18_viewDidAppear, method_getTypeEncoding(m))) {
-        Method own = class_getInstanceMethod(cls, @selector(viewDidAppear:));
-        orig = method_getImplementation(own);
-        method_setImplementation(own, (IMP)hook_C18_viewDidAppear);
+    Method m;
+
+    m = class_getInstanceMethod(cls, @selector(tableView:viewForFooterInSection:));
+    {
+        IMP orig = m ? method_getImplementation(m) : NULL;
+        if (!class_addMethod(cls, @selector(tableView:viewForFooterInSection:),
+                             (IMP)hook_viewForFooter, "v@:@q")) {
+            Method own = class_getInstanceMethod(cls, @selector(tableView:viewForFooterInSection:));
+            orig = method_getImplementation(own);
+            method_setImplementation(own, (IMP)hook_viewForFooter);
+        }
+        orig_viewForFooter = (id (*)(id, SEL, id, NSInteger))orig;
     }
-    orig_C18_viewDidAppear = (void (*)(id, SEL, BOOL))orig;
-    C18Log(@"viewDidAppear hooked");
+    m = class_getInstanceMethod(cls, @selector(tableView:heightForFooterInSection:));
+    {
+        IMP orig = m ? method_getImplementation(m) : NULL;
+        if (!class_addMethod(cls, @selector(tableView:heightForFooterInSection:),
+                             (IMP)hook_heightForFooter, "d@:@q")) {
+            Method own = class_getInstanceMethod(cls, @selector(tableView:heightForFooterInSection:));
+            orig = method_getImplementation(own);
+            method_setImplementation(own, (IMP)hook_heightForFooter);
+        }
+        orig_heightForFooter = (CGFloat (*)(id, SEL, id, NSInteger))orig;
+    }
+    C18Log(@"footer-delegate hooked");
 }
 
 __attribute__((constructor)) static void C18Init(void) {
