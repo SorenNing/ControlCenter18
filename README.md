@@ -1,4 +1,4 @@
-# ControlCenter18-CN
+# ControlCenter18
 
 **ControlCenter18（iOS 18 风格控制中心）整合 CCLess++ 30 个模块 + 中文汉化 + 设置页作者头像行**
 
