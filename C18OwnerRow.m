@@ -45,6 +45,7 @@ static void C18AppendOwnerGroup(id self) {
     NSArray *current = nil;
     @try { current = [self valueForKey:@"_specifiers"]; } @catch (__unused NSException *e) {}
     if (![current isKindOfClass:NSArray.class]) { C18Log(@"no _specifiers"); return; }
+    C18Log(@"_specifiers count=%lu", (unsigned long)current.count);
     if (!current.count) { C18Log(@"_specifiers empty"); return; }
 
     // 防重复
@@ -96,22 +97,25 @@ static void C18AppendOwnerGroup(id self) {
 
 #pragma mark - hook
 
-static void (*orig_viewWillAppear)(id, SEL, BOOL);
-static void hook_viewWillAppear(id self, SEL _cmd, BOOL animated) {
-    if (orig_viewWillAppear) orig_viewWillAppear(self, _cmd, animated);
+static void (*orig_viewDidAppear)(id, SEL, BOOL);
+static void hook_viewDidAppear(id self, SEL _cmd, BOOL animated) {
+    if (orig_viewDidAppear) orig_viewDidAppear(self, _cmd, animated);
+    // 作者用 _pendingSpecifiers 延迟应用，viewDidAppear 后才就绪
     C18AppendOwnerGroup(self);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{ C18AppendOwnerGroup(self); });
 }
 
 static void C18Install(void) {
     Class cls = NSClassFromString(@"C18PRootListController");
     if (!cls) { C18Log(@"class not found"); return; }
-    if (orig_viewWillAppear) { C18Log(@"already hooked"); return; }
-    Method m = class_getInstanceMethod(cls, @selector(viewWillAppear:));
-    if (!m) { C18Log(@"no viewWillAppear"); return; }
+    if (orig_viewDidAppear) { C18Log(@"already hooked"); return; }
+    Method m = class_getInstanceMethod(cls, @selector(viewDidAppear:));
+    if (!m) { C18Log(@"no viewDidAppear"); return; }
     IMP orig = method_getImplementation(m);
-    class_addMethod(cls, @selector(viewWillAppear:), (IMP)hook_viewWillAppear, method_getTypeEncoding(m));
-    orig_viewWillAppear = (void (*)(id, SEL, BOOL))orig;
-    C18Log(@"viewWillAppear hooked");
+    class_addMethod(cls, @selector(viewDidAppear:), (IMP)hook_viewDidAppear, method_getTypeEncoding(m));
+    orig_viewDidAppear = (void (*)(id, SEL, BOOL))orig;
+    C18Log(@"viewDidAppear hooked");
 }
 
 __attribute__((constructor)) static void C18Init(void) {
