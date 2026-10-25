@@ -2,12 +2,14 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// ControlCenter18 设置页最后添加一个标准设置项（cell）：
-// 头像图标 + "Ning自用二改版"，点击跳转 GitHub 主页。
-// 实现：hook 表格数据源（最后一个 section 的最后一行插入）。
+// ControlCenter18 设置页底部添加一个分组：
+//   组标题：Ning自用二改版（红字）
+//   组内行：头像图标 + "Ning个人源"，点击跳转 GitHub 主页。
+// 实现：hook viewWillAppear:，向 _specifiers 追加 group + link 两个 PSSpecifier
 
 static NSString *const kOwnerRepoURL = @"https://github.com/SorenNing";
-static NSString *const kRowTitle = @"Ning自用二改版";
+static NSString *const kGroupTitle = @"Ning自用二改版";
+static NSString *const kRowTitle = @"Ning个人源";
 
 #pragma mark - 日志
 
@@ -37,101 +39,78 @@ static UIImage *C18OwnerAvatar(void) {
     return [UIImage imageNamed:@"owner-avatar" inBundle:bundle compatibleWithTraitCollection:nil];
 }
 
-static void C18OwnerOpen(void) {
-    NSURL *url = [NSURL URLWithString:kOwnerRepoURL];
-    if (url && @available(iOS 10.0, *)) {
-        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-        C18Log(@"open url");
-    }
-}
+#pragma mark - specifiers 追加
 
-#pragma mark - 最后一行判定
+static void C18AppendOwnerGroup(id self) {
+    NSArray *current = nil;
+    @try { current = [self valueForKey:@"_specifiers"]; } @catch (__unused NSException *e) {}
+    if (![current isKindOfClass:NSArray.class]) { C18Log(@"no _specifiers"); return; }
+    if (!current.count) { C18Log(@"_specifiers empty"); return; }
 
-static BOOL C18IsOwnerIndexPath(NSIndexPath *ip, id table, id controller) {
-    NSInteger sections = 0;
-    @try {
-        sections = ((NSInteger (*)(id, SEL, id))objc_msgSend)(controller, @selector(numberOfSectionsInTableView:), table);
-    } @catch (__unused NSException *e) { return NO; }
-    if (ip.section != sections - 1) return NO;
-    NSInteger rows = 0;
-    @try {
-        rows = ((NSInteger (*)(id, SEL, id, NSInteger))objc_msgSend)(
-            controller, @selector(tableView:numberOfRowsInSection:), table, ip.section);
-    } @catch (__unused NSException *e) { return NO; }
-    return ip.row == rows - 1;
-}
-
-#pragma mark - 数据源 hook
-
-static NSInteger (*orig_numberOfRows)(id, SEL, id, NSInteger);
-static NSInteger hook_numberOfRows(id self, SEL _cmd, id table, NSInteger section) {
-    NSInteger rows = orig_numberOfRows ? orig_numberOfRows(self, _cmd, table, section) : 0;
-    NSInteger sections = 0;
-    @try {
-        sections = ((NSInteger (*)(id, SEL, id))objc_msgSend)(self, @selector(numberOfSectionsInTableView:), table);
-    } @catch (__unused NSException *e) { return rows; }
-    if (section == sections - 1) return rows + 1; // 最后分组多一行
-    return rows;
-}
-
-static id (*orig_cellForRow)(id, SEL, id, id);
-static id hook_cellForRow(id self, SEL _cmd, id table, NSIndexPath *ip) {
-    if (C18IsOwnerIndexPath(ip, table, self)) {
-        NSString *reuse = @"c18OwnerCell";
-        UITableViewCell *cell = [table dequeueReusableCellWithIdentifier:reuse];
-        if (!cell) {
-            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuse];
-            cell.imageView.layer.cornerRadius = 13.0;
-            cell.imageView.layer.masksToBounds = YES;
-            cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    // 防重复
+    for (id sp in current) {
+        id name = [sp valueForKey:@"name"];
+        if ([name isKindOfClass:NSString.class] && [name isEqualToString:kGroupTitle]) {
+            C18Log(@"group already present"); return;
         }
-        cell.textLabel.text = kRowTitle;
-        cell.imageView.image = C18OwnerAvatar();
-        [cell.imageView sizeToFit];
-        return cell;
     }
-    return orig_cellForRow ? orig_cellForRow(self, _cmd, table, ip) : nil;
+
+    Class psc = NSClassFromString(@"PSSpecifier");
+    if (!psc) { C18Log(@"no PSSpecifier"); return; }
+
+    // 分组（标题红色）
+    id group = nil;
+    @try {
+        group = ((id (*)(id, SEL, id))objc_msgSend)(psc, @selector(groupSpecifierWithName:), kGroupTitle);
+        if (group) {
+            [group setProperty:UIColor.systemRedColor forKey:@"titleColor"];
+        }
+    } @catch (__unused NSException *e) { group = nil; }
+
+    // 链接行（头像 + 标题 + url）
+    id link = nil;
+    @try {
+        link = ((id (*)(id, SEL, id, id, id, id, id, NSInteger, id))objc_msgSend)(
+            psc, @selector(preferenceSpecifierNamed:target:set:get:detail:cell:edit:),
+            kRowTitle, self, nil, nil, nil, 1 /* PSLinkCell */, nil);
+        if (link) {
+            UIImage *avatar = C18OwnerAvatar();
+            if (avatar) [link setProperty:avatar forKey:@"iconImage"];
+            [link setProperty:kOwnerRepoURL forKey:@"url"];
+            [link setProperty:@YES forKey:@"isLink"];
+        }
+    } @catch (__unused NSException *e) { link = nil; }
+
+    if (!group && !link) { C18Log(@"specifier create failed"); return; }
+
+    NSMutableArray *newList = [current mutableCopy];
+    if (group) [newList addObject:group];
+    if (link) [newList addObject:link];
+    @try {
+        [self setValue:newList forKey:@"_specifiers"];
+        [self reloadSpecifiers];
+    } @catch (__unused NSException *e) { C18Log(@"apply failed"); return; }
+    C18Log(@"owner group appended (group=%@ link=%@)", group ? @"OK" : @"nil", link ? @"OK" : @"nil");
 }
 
-static void (*orig_didSelect)(id, SEL, id, id);
-static void hook_didSelect(id self, SEL _cmd, id table, NSIndexPath *ip) {
-    if (C18IsOwnerIndexPath(ip, table, self)) {
-        [table deselectRowAtIndexPath:ip animated:YES];
-        C18OwnerOpen();
-        return;
-    }
-    if (orig_didSelect) orig_didSelect(self, _cmd, table, ip);
-}
+#pragma mark - hook
 
-#pragma mark - hook 安装
+static void (*orig_viewWillAppear)(id, SEL, BOOL);
+static void hook_viewWillAppear(id self, SEL _cmd, BOOL animated) {
+    if (orig_viewWillAppear) orig_viewWillAppear(self, _cmd, animated);
+    C18AppendOwnerGroup(self);
+}
 
 static void C18Install(void) {
     Class cls = NSClassFromString(@"C18PRootListController");
     if (!cls) { C18Log(@"class not found"); return; }
-    if (orig_numberOfRows) { C18Log(@"already hooked"); return; }
-
-    Method m;
-
-    m = class_getInstanceMethod(cls, @selector(tableView:numberOfRowsInSection:));
-    if (m) {
-        IMP orig = method_getImplementation(m);
-        class_addMethod(cls, @selector(tableView:numberOfRowsInSection:), (IMP)hook_numberOfRows, method_getTypeEncoding(m));
-        orig_numberOfRows = (NSInteger (*)(id, SEL, id, NSInteger))orig;
-    }
-    m = class_getInstanceMethod(cls, @selector(tableView:cellForRowAtIndexPath:));
-    if (m) {
-        IMP orig = method_getImplementation(m);
-        class_addMethod(cls, @selector(tableView:cellForRowAtIndexPath:), (IMP)hook_cellForRow, method_getTypeEncoding(m));
-        orig_cellForRow = (id (*)(id, SEL, id, id))orig;
-    }
-    m = class_getInstanceMethod(cls, @selector(tableView:didSelectRowAtIndexPath:));
-    if (m) {
-        IMP orig = method_getImplementation(m);
-        class_addMethod(cls, @selector(tableView:didSelectRowAtIndexPath:), (IMP)hook_didSelect, method_getTypeEncoding(m));
-        orig_didSelect = (void (*)(id, SEL, id, id))orig;
-    }
-    C18Log(@"datasource hooked");
+    if (orig_viewWillAppear) { C18Log(@"already hooked"); return; }
+    Method m = class_getInstanceMethod(cls, @selector(viewWillAppear:));
+    if (!m) { C18Log(@"no viewWillAppear"); return; }
+    IMP orig = method_getImplementation(m);
+    class_addMethod(cls, @selector(viewWillAppear:), (IMP)hook_viewWillAppear, method_getTypeEncoding(m));
+    orig_viewWillAppear = (void (*)(id, SEL, BOOL))orig;
+    C18Log(@"viewWillAppear hooked");
 }
 
 __attribute__((constructor)) static void C18Init(void) {
