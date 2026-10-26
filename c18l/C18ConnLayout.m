@@ -23,8 +23,8 @@ static void CLlog(NSString *fmt, ...) {
 
 static void (*orig_setGridSize)(id, SEL, long long);
 static void hook_setGridSize(id self, SEL _cmd, long long size) {
-    CLlog(@"setGridSize: %lld -> 5", size);
-    if (orig_setGridSize) orig_setGridSize(self, _cmd, 5);
+    CLlog(@"setGridSize: %lld -> 3", size);
+    if (orig_setGridSize) orig_setGridSize(self, _cmd, 3);
 }
 
 static void CLInstall(void) {
