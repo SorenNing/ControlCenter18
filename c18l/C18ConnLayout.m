@@ -2,8 +2,8 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// 连接模块：保留 CC18 原有 7 按钮角色/状态逻辑，
-// 但在布局完成后自行排布：只显示前 5 个，均匀铺满一行，隐藏其余。
+// CC18 连接模块：只保留 5 个按钮（飞行/热点/蜂窝/WiFi/蓝牙），按指定顺序重排。
+// 做法：布局后接管 _cluster —— 移除多余按钮、按新顺序重排、修正命中。
 
 static void CLlog(NSString *fmt, ...) {
     @autoreleasepool {
@@ -20,13 +20,25 @@ static void CLlog(NSString *fmt, ...) {
 
 #define KEEP_COUNT 5
 
+// 期望顺序里的按钮索引（由探测日志确定后填入；-1 表示未知，按原顺序补）
+static int gWanted[KEEP_COUNT] = {-1, -1, -1, -1, -1};
+
 static void (*orig_layout)(id, SEL);
-// 排布：前 KEEP_COUNT 个均匀一行，其余隐藏。
-// 注意：按钮默认可能带 transform（CC18 用 transform 定位），必须先归零再设 frame，
-// 否则 frame 与视觉位置不一致，导致点击命中错位。
 static CGRect gSlot[8];
 static NSUInteger gSlotCount = 0;
-static __weak id gLastView = nil;
+
+static NSString *ButtonIconName(UIView *b) {
+    // 尝试从 CC18 的按钮里读图标/标识
+    @try {
+        id glyph = [b valueForKey:@"_glyphView"];
+        if (glyph) return NSStringFromClass([glyph class]);
+    } @catch (__unused NSException *e) {}
+    @try {
+        id ident = [b valueForKey:@"_identifier"];
+        if ([ident isKindOfClass:NSString.class]) return ident;
+    } @catch (__unused NSException *e) {}
+    return NSStringFromClass([b class]);
+}
 
 static void hook_layout(id self, SEL _cmd) {
     if (orig_layout) orig_layout(self, _cmd);
@@ -35,27 +47,32 @@ static void hook_layout(id self, SEL _cmd) {
     UIView *cluster = nil;
     @try { buttons = [self valueForKey:@"_buttons"]; } @catch (__unused NSException *e) {}
     @try { cluster = [self valueForKey:@"_cluster"]; } @catch (__unused NSException *e) {}
-    if (![buttons isKindOfClass:NSArray.class] || buttons.count < 2) {
-        CLlog(@"no buttons (count=%lu)", (unsigned long)buttons.count);
-        return;
-    }
+    if (![buttons isKindOfClass:NSArray.class] || buttons.count < 2) return;
     if (!cluster) cluster = [buttons.firstObject superview];
-    if (!cluster) { CLlog(@"no cluster"); return; }
+    if (!cluster) return;
 
     static BOOL loggedOnce = NO;
     if (!loggedOnce) {
         loggedOnce = YES;
-        CLlog(@"buttons=%lu cluster=%@", (unsigned long)buttons.count, NSStringFromCGRect(cluster.bounds));
+        CLlog(@"=== buttons=%lu cluster=%@ ===", (unsigned long)buttons.count, NSStringFromCGRect(cluster.bounds));
         for (NSUInteger i = 0; i < buttons.count; i++) {
             UIView *b = buttons[i];
-            CLlog(@"  #%lu frame=%@ center=%@ tf=%@ cls=%@",
-                  (unsigned long)i, NSStringFromCGRect(b.frame),
-                  NSStringFromCGPoint(b.center), NSStringFromCGAffineTransform(b.transform),
-                  NSStringFromClass(b.class));
+            CLlog(@"  #%lu icon=%@ frame=%@ center=%@",
+                  (unsigned long)i, ButtonIconName(b),
+                  NSStringFromCGRect(b.frame), NSStringFromCGPoint(b.center));
+            // 尝试 dump 所有 ivar 名，帮助识别
+            unsigned int cnt = 0;
+            Ivar *ivars = class_copyIvarList([b class], &cnt);
+            NSMutableString *iv = [NSMutableString string];
+            for (unsigned int k = 0; k < cnt && k < 12; k++) {
+                [iv appendFormat:@"%s ", ivar_getName(ivars[k])];
+            }
+            free(ivars);
+            CLlog(@"      ivars: %@", iv);
         }
     }
 
-    // 关键：先清掉 transform，再用 frame 布局（否则 frame 与视觉位置不一致）
+    // 归零 transform（CC18 用 transform 定位）
     for (UIView *b in buttons) {
         if (!CGAffineTransformIsIdentity(b.transform)) b.transform = CGAffineTransformIdentity;
     }
@@ -67,52 +84,57 @@ static void hook_layout(id self, SEL _cmd) {
     }
     if (bw <= 0) return;
 
-    CGFloat margin = 10.0;
+    CGFloat margin = 8.0;
     NSUInteger shown = MIN((NSUInteger)KEEP_COUNT, buttons.count);
     CGFloat usable = cb.size.width - margin * 2;
     CGFloat gap = (shown > 1) ? (usable - shown * bw) / (CGFloat)(shown - 1) : 0;
-    if (gap < 4.0) gap = 4.0;
+    if (gap < 2.0) gap = 2.0;
     CGFloat cy = cb.size.height / 2.0;
 
-    gSlotCount = shown;
-    for (NSUInteger i = 0; i < buttons.count; i++) {
-        UIView *b = buttons[i];
-        if (i < shown) {
-            b.hidden = NO;
-            b.alpha = 1.0;
-            CGRect f = CGRectMake(margin + i * (bw + gap), cy - bh / 2.0, bw, bh);
-            b.frame = f;
-            gSlot[i] = f;
-        } else {
-            b.hidden = YES;
+    // 决定实际显示顺序
+    NSMutableArray *order = [NSMutableArray array];
+    for (int i = 0; i < KEEP_COUNT; i++) {
+        int idx = gWanted[i];
+        if (idx >= 0 && idx < (int)buttons.count) [order addObject:@(idx)];
+    }
+    if (order.count < shown) {
+        // 未配置时按原顺序补
+        for (NSUInteger i = 0; i < buttons.count && order.count < shown; i++) {
+            if (![order containsObject:@(i)]) [order addObject:@(i)];
         }
     }
-    // 关键：重排后让 cluster 的尺寸贴合实际内容，避免点按落在 cluster 之外被吞掉
+
+    gSlotCount = order.count;
+    for (NSUInteger k = 0; k < order.count; k++) {
+        UIView *b = buttons[[order[k] unsignedIntegerValue]];
+        b.hidden = NO;
+        b.alpha = 1.0;
+        CGRect f = CGRectMake(margin + k * (bw + gap), cy - bh / 2.0, bw, bh);
+        b.frame = f;
+        b.userInteractionEnabled = YES;
+        gSlot[k] = f;
+    }
+    // 未选中的隐藏
     for (UIView *b in buttons) {
-        if (!b.hidden) b.userInteractionEnabled = YES;
+        BOOL keep = NO;
+        for (NSNumber *n in order) if (buttons[[n unsignedIntegerValue]] == b) { keep = YES; break; }
+        if (!keep) b.hidden = YES;
     }
 }
 
-// 命中修正：原 hitTest 可能按旧位置判断，这里直接按新槽位分发
 static UIView *(*orig_hitTest)(id, SEL, CGPoint, UIEvent *);
 static UIView *hook_hitTest(id self, SEL _cmd, CGPoint point, UIEvent *event) {
     NSArray *buttons = nil;
     @try { buttons = [self valueForKey:@"_buttons"]; } @catch (__unused NSException *e) {}
     if (gSlotCount > 0 && [buttons isKindOfClass:NSArray.class]) {
-        UIView *cluster = nil;
-        @try { cluster = [self valueForKey:@"_cluster"]; } @catch (__unused NSException *e) {}
-        if (!cluster) cluster = [buttons.firstObject superview];
+        UIView *cluster = [buttons.firstObject superview];
         if (cluster) {
             CGPoint p = [self convertPoint:point toView:cluster];
             NSUInteger n = MIN(gSlotCount, buttons.count);
             for (NSUInteger i = 0; i < n; i++) {
                 UIView *b = buttons[i];
                 if (b.hidden) continue;
-                // 扩大命中范围（圆按钮之间的空隙也能点中最近的）
-                CGRect hit = CGRectInset(gSlot[i], -6, -6);
-                if (CGRectContainsPoint(hit, p)) {
-                    return b;
-                }
+                if (CGRectContainsPoint(CGRectInset(gSlot[i], -4, -4), p)) return b;
             }
         }
     }
@@ -127,22 +149,17 @@ static void CLInstall(void) {
     if (!m) { CLlog(@"no layoutSubviews"); return; }
     orig_layout = (void (*)(id, SEL))method_getImplementation(m);
     method_setImplementation(m, (IMP)hook_layout);
-    CLlog(@"layoutSubviews REPLACED OK");
-
-    // 同步 hook hitTest:withEvent: 修正点击命中
     Method h = class_getInstanceMethod(cls, @selector(hitTest:withEvent:));
-    if (h && !orig_hitTest) {
+    if (h) {
         orig_hitTest = (UIView *(*)(id, SEL, CGPoint, UIEvent *))method_getImplementation(h);
         method_setImplementation(h, (IMP)hook_hitTest);
-        CLlog(@"hitTest REPLACED OK");
-    } else if (!h) {
-        CLlog(@"no hitTest:withEvent:");
     }
+    CLlog(@"hooks installed (layout+hitTest)");
 }
 
 __attribute__((constructor)) static void CLInit(void) {
     @autoreleasepool {
-        CLlog(@"C18ConnLayout loaded");
+        CLlog(@"C18ConnLayout v3 loaded");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ CLInstall(); });
     }
