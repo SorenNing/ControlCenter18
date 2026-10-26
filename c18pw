@@ -1,0 +1,166 @@
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+#import <spawn.h>
+#import <stdarg.h>
+#import <stdlib.h>
+#import <dlfcn.h>
+#import <notify.h>
+#import <signal.h>
+#import <sys/types.h>
+
+// v10：hook C18Shell -_powerTriggered（CC18 电源按钮点击唯一入口），
+// 中文菜单动作直接多路径执行（RootHide /var/jb 前缀优先），不依赖外部 helper。
+
+static NSString *const kSafeModeMarker = @"/var/mobile/Library/.C18SafeMode";
+
+static void C18Log(NSString *fmt, ...) {
+    @autoreleasepool {
+        va_list args; va_start(args, fmt);
+        NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+        va_end(args);
+        NSString *path = @"/var/mobile/Documents/C18PowerMenu.log";
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (fh) { [fh seekToEndOfFile]; [fh writeData:[[msg stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
+    }
+}
+
+// v10：不依赖外部 helper，直接尝试多个 RootHide 路径执行命令
+
+// v12：照抄 CCRespring 机制——用无前缀 /usr/bin 路径 + dylib 带 .roothidepatch 链接，
+// 由 RootHide AutoPatches 在加载时自动重定向到真实 jbroot 路径。（CCRespring 即以此生效）
+
+static BOOL C18TryRun(NSString *path, ...) {
+    if (![[NSFileManager defaultManager] isExecutableFileAtPath:path]) { C18Log(@"skip (not exec): %@", path); return NO; }
+    NSMutableArray *args = [NSMutableArray array];
+    va_list ap; va_start(ap, path);
+    NSString *arg;
+    while ((arg = va_arg(ap, NSString *))) [args addObject:arg];
+    va_end(ap);
+    size_t n = (size_t)args.count + 2;
+    char **argv = (char **)calloc(n, sizeof(char *));
+    if (!argv) return NO;
+    argv[0] = (char *)[path UTF8String];
+    for (NSUInteger i = 0; i < args.count; i++) argv[i + 1] = (char *)[args[i] UTF8String];
+    argv[n - 1] = NULL;
+    pid_t pid;
+    int err = posix_spawn(&pid, argv[0], NULL, NULL, argv, NULL);
+    free(argv);
+    if (err != 0) { C18Log(@"spawn fail %@ err=%d", path, err); return NO; }
+    C18Log(@"spawn ok %@", path);
+    return YES;
+}
+
+static void C18Respring(void) {
+    C18Log(@"respring attempt");
+    if (C18TryRun(@"/usr/bin/killall", @"-SEGV", @"SpringBoard", nil)) return;
+    if (C18TryRun(@"/usr/bin/sbreload", nil)) return;
+    if (C18TryRun(@"/var/jb/usr/bin/killall", @"-SEGV", @"SpringBoard", nil)) return;
+    if (C18TryRun(@"/var/jb/usr/bin/sbreload", nil)) return;
+    C18Log(@"respring: all paths failed");
+}
+
+static void C18Ldrestart(void) {
+    C18Log(@"ldrestart attempt");
+    if (C18TryRun(@"/usr/bin/ldrestart", nil)) return;
+    if (C18TryRun(@"/usr/bin/sbreload", nil)) return;
+    if (C18TryRun(@"/var/jb/usr/bin/ldrestart", nil)) return;
+    if (C18TryRun(@"/usr/bin/killall", @"-SEGV", @"SpringBoard", nil)) return;
+    C18Log(@"ldrestart: all paths failed");
+}
+
+static void C18RebootUserspace(void) {
+    C18Log(@"reboot userspace attempt");
+    if (C18TryRun(@"/usr/bin/launchctl", @"reboot", @"userspace", nil)) return;
+    if (C18TryRun(@"/var/jb/bin/launchctl", @"reboot", @"userspace", nil)) return;
+    if (C18TryRun(@"/usr/bin/ldrestart", nil)) return;
+    if (C18TryRun(@"/var/jb/usr/bin/ldrestart", nil)) return;
+    C18Log(@"reboot userspace: all paths failed");
+}
+
+static void C18SafeMode(void) {
+    [[NSFileManager defaultManager] createFileAtPath:kSafeModeMarker contents:[NSData data] attributes:nil];
+    C18Log(@"safe mode marker written, respring");
+    C18Respring();
+}
+
+static void C18Shutdown(void) {
+    C18Log(@"shutdown attempt");
+    if (C18TryRun(@"/usr/bin/launchctl", @"reboot", @"shutdown", nil)) return;
+    if (C18TryRun(@"/usr/bin/launchctl", @"reboot", nil)) return;
+    if (C18TryRun(@"/var/jb/bin/launchctl", @"reboot", nil)) return;
+    C18Log(@"shutdown: all paths failed");
+}
+
+// 打印真实 jbroot 前缀（供诊断路径猜想）
+static void C18DumpJB(void) {
+    NSArray *candidates = @[@"/var/jb", @"/.jbroot", @"/var/containers/Bundle/Application"];
+    for (NSString *p in candidates) {
+        BOOL isDir = NO;
+        BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:p isDirectory:&isDir];
+        C18Log(@"jb probe %@ exists=%d isDir=%d", p, exists, isDir);
+    }
+    NSError *err = nil;
+    NSArray *appDir = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@"/var/containers/Bundle/Application" error:&err];
+    for (NSString *n in appDir ?: @[]) {
+        if ([n hasPrefix:@".jbroot"]) {
+            C18Log(@"jbroot found: /var/containers/Bundle/Application/%@", n);
+        }
+    }
+}
+
+static UIViewController *C18TopVC(void) {
+    UIWindow *w = UIApplication.sharedApplication.keyWindow;
+    if (!w) w = UIApplication.sharedApplication.windows.firstObject;
+    UIViewController *vc = w.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    return vc;
+}
+
+static void (*orig_powerTriggered)(id, SEL);
+static void hook_powerTriggered(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    C18Log(@"_powerTriggered intercepted");
+    UIViewController *vc = C18TopVC();
+    if (!vc) { if (orig_powerTriggered) orig_powerTriggered(self, _cmd); return; }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"电源" message:nil
+        preferredStyle:UIAlertControllerStyleActionSheet];
+    [alert addAction:[UIAlertAction actionWithTitle:@"关机" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a){ C18Shutdown(); }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"注销" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){ C18Respring(); }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"重启系统" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){ C18Ldrestart(); }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"重启用户空间" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){ C18RebootUserspace(); }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"安全模式" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){ C18SafeMode(); }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [vc presentViewController:alert animated:YES completion:nil];
+    C18Log(@"zh power menu shown");
+}
+
+static void C18Install(void) {
+    Class cls = NSClassFromString(@"C18Shell");
+    if (!cls) { C18Log(@"C18Shell not found"); return; }
+    Method m = class_getInstanceMethod(cls, NSSelectorFromString(@"_powerTriggered"));
+    if (!m) { C18Log(@"C18Shell _powerTriggered not found"); return; }
+    if (orig_powerTriggered) { C18Log(@"already hooked"); return; }
+    IMP orig = method_getImplementation(m);
+    // 方法已存在：必须用 method_setImplementation 真正替换（class_addMethod 会静默失败）
+    method_setImplementation(m, (IMP)hook_powerTriggered);
+    orig_powerTriggered = (void (*)(id, SEL))orig;
+    // 立即校验是否真的替换成功
+    IMP cur = method_getImplementation(m);
+    C18Log(cur == (IMP)hook_powerTriggered ? @"_powerTriggered REPLACED OK"
+                                           : @"_powerTriggered REPLACE FAILED");
+}
+
+__attribute__((constructor)) static void C18Init(void) {
+    @autoreleasepool {
+        C18Log(@"C18PowerMenu loaded, bundle=%@", NSBundle.mainBundle.bundleIdentifier);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (int i = 0; i < 10; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * (i + 1) * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{ C18Install(); });
+            }
+        });
+    }
+}
