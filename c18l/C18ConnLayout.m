@@ -84,12 +84,13 @@ static void CLFilterButtons(id self) {
         [self setValue:[picked copy] forKey:@"_buttons"];
         // 强制 5 按钮布局分支
         SEL sg = NSSelectorFromString(@"setGridSize:");
-        if ([self respondsToSelector:sg]) ((void (*)(id, SEL, long long))objc_msgSend)(self, sg, 3);
+        if ([self respondsToSelector:sg]) { void (*f)(id,SEL,long long) = (void (*)(id,SEL,long long))[self methodForSelector:sg]; if (f) f(self, sg, 3); }
         CLlog(@"_buttons set to 5, gridSize=3");
+        (void)sg;
     } @catch (NSException *e) { CLlog(@"filter fail: %@", e.reason); }
 }
 
-static void (*orig_initLegacy)(id, SEL, id);
+static id (*orig_initLegacy)(id, SEL, id);
 static id hook_initLegacy(id self, SEL _cmd, id module) {
     id r = orig_initLegacy ? orig_initLegacy(self, _cmd, module) : nil;
     if (r) CLFilterButtons(r);
@@ -106,7 +107,7 @@ __attribute__((constructor)) static void CLInit(void) {
                     if (!cls) return;
                     Method m = class_getInstanceMethod(cls, NSSelectorFromString(@"initWithLegacyModule:"));
                     if (!m || orig_initLegacy) return;
-                    orig_initLegacy = (void (*)(id, SEL, id))method_getImplementation(m);
+                    orig_initLegacy = (id (*)(id, SEL, id))method_getImplementation(m);
                     method_setImplementation(m, (IMP)hook_initLegacy);
                     CLlog(@"initWithLegacyModule REPLACED OK");
                 });
