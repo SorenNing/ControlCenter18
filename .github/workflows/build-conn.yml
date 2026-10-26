@@ -1,0 +1,27 @@
+name: Build C18ConnLayout arm64e
+on:
+  push:
+    branches: [ 'c18l' ]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ldid || true
+      - run: |
+          set -euo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          clang -c -fobjc-arc -target arm64-apple-ios15.0 -arch arm64e -isysroot "$SDK" \
+                c18l/C18ConnLayout.m -o C18ConnLayout.o
+          ld -arch arm64e -dylib -platform_version ios 15.0 16.5 -syslibroot "$SDK" \
+             -install_name /Library/MobileSubstrate/DynamicLibraries/C18ConnLayout.dylib \
+             -undefined dynamic_lookup -no_implicit_dylibs -ignore_auto_link -dead_strip -fixup_chains \
+             C18ConnLayout.o -lobjc -lSystem -o C18ConnLayout.dylib
+          ldid -S -Cadhoc C18ConnLayout.dylib
+          file C18ConnLayout.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: C18ConnLayout-arm64e
+          path: C18ConnLayout.dylib
