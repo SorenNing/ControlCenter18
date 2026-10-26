@@ -87,6 +87,10 @@ static void hook_layout(id self, SEL _cmd) {
             b.hidden = YES;
         }
     }
+    // 关键：重排后让 cluster 的尺寸贴合实际内容，避免点按落在 cluster 之外被吞掉
+    for (UIView *b in buttons) {
+        if (!b.hidden) b.userInteractionEnabled = YES;
+    }
 }
 
 // 命中修正：原 hitTest 可能按旧位置判断，这里直接按新槽位分发
