@@ -2,14 +2,15 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// CC18 连接模块：只保留 5 个按钮（飞行/热点/蜂窝/WiFi/蓝牙），按指定顺序重排。
-// 做法：布局后接管 _cluster —— 移除多余按钮、按新顺序重排、修正命中。
+// v4：正确方案 —— 把 _buttons 缩减为 5 个 + 强制 gridSize=3，
+// 让 CC18 自己的 layoutSubviews 排版（不碰 frame，不再错位）。
+// 目标顺序：飞行 > WiFi > 蓝牙 > 热点 > 蜂窝
 
 static void CLlog(NSString *fmt, ...) {
     @autoreleasepool {
-        va_list ap; va_start(ap, fmt);
-        NSString *m = [[NSString alloc] initWithFormat:fmt arguments:ap];
-        va_end(ap);
+        va_list a; va_start(a, fmt);
+        NSString *m = [[NSString alloc] initWithFormat:fmt arguments:a];
+        va_end(a);
         NSString *p = @"/var/mobile/Documents/C18ConnLayout.log";
         NSFileManager *fm = [NSFileManager defaultManager];
         if (![fm fileExistsAtPath:p]) [fm createFileAtPath:p contents:nil attributes:nil];
@@ -18,149 +19,98 @@ static void CLlog(NSString *fmt, ...) {
     }
 }
 
-#define KEEP_COUNT 5
+static NSArray *g_origButtons;
 
-// 期望顺序里的按钮索引（由探测日志确定后填入；-1 表示未知，按原顺序补）
-static int gWanted[KEEP_COUNT] = {-1, -1, -1, -1, -1};
-
-static void (*orig_layout)(id, SEL);
-static CGRect gSlot[8];
-static NSUInteger gSlotCount = 0;
-
-static NSString *ButtonIconName(UIView *b) {
-    // 尝试从 CC18 的按钮里读图标/标识
-    @try {
-        id glyph = [b valueForKey:@"_glyphView"];
-        if (glyph) return NSStringFromClass([glyph class]);
-    } @catch (__unused NSException *e) {}
-    @try {
-        id ident = [b valueForKey:@"_identifier"];
-        if ([ident isKindOfClass:NSString.class]) return ident;
-    } @catch (__unused NSException *e) {}
-    return NSStringFromClass([b class]);
+// 目标顺序（用小写关键字匹配 VC 类名/标识）
+static NSArray<NSString *> *CLDesiredOrder(void) {
+    return @[@"airplane", @"wifi", @"bluetooth", @"hotspot", @"cellular"];
 }
 
-static void hook_layout(id self, SEL _cmd) {
-    if (orig_layout) orig_layout(self, _cmd);
+static NSString *CLIdentForButton(NSArray *buttons, NSUInteger idx, id legacyDict) {
+    // 先试 dictionary allKeys
+    if ([legacyDict isKindOfClass:[NSDictionary class]]) {
+        NSArray *keys = [legacyDict allKeys];
+        if (idx < keys.count) return [keys[idx] description];
+    }
+    return nil;
+}
 
-    NSArray *buttons = nil;
-    UIView *cluster = nil;
-    @try { buttons = [self valueForKey:@"_buttons"]; } @catch (__unused NSException *e) {}
-    @try { cluster = [self valueForKey:@"_cluster"]; } @catch (__unused NSException *e) {}
-    if (![buttons isKindOfClass:NSArray.class] || buttons.count < 2) return;
-    if (!cluster) cluster = [buttons.firstObject superview];
-    if (!cluster) return;
+static void CLFilterButtons(id self) {
+    @try {
+        NSArray *buttons = [self valueForKey:@"_buttons"];
+        if (![buttons isKindOfClass:[NSArray class]]) { CLlog(@"no _buttons"); return; }
+        if (g_origButtons && [buttons isEqualToArray:g_origButtons]) {
+            // already filtered
+        }
+        id legacy = nil;
+        @try { legacy = [self valueForKey:@"_legacy"]; } @catch (__unused NSException *e) {}
 
-    static BOOL loggedOnce = NO;
-    if (!loggedOnce) {
-        loggedOnce = YES;
-        CLlog(@"=== buttons=%lu cluster=%@ ===", (unsigned long)buttons.count, NSStringFromCGRect(cluster.bounds));
+        CLlog(@"=== buttons=%lu legacyKeys=%@ ===", (unsigned long)buttons.count,
+              [legacy isKindOfClass:[NSDictionary class]] ? [[legacy allKeys] componentsJoinedByString:@","] : @"n/a");
+
+        NSMutableArray *named = [NSMutableArray array];
         for (NSUInteger i = 0; i < buttons.count; i++) {
             UIView *b = buttons[i];
-            CLlog(@"  #%lu icon=%@ frame=%@ center=%@",
-                  (unsigned long)i, ButtonIconName(b),
-                  NSStringFromCGRect(b.frame), NSStringFromCGPoint(b.center));
-            // 尝试 dump 所有 ivar 名，帮助识别
-            unsigned int cnt = 0;
-            Ivar *ivars = class_copyIvarList([b class], &cnt);
-            NSMutableString *iv = [NSMutableString string];
-            for (unsigned int k = 0; k < cnt && k < 12; k++) {
-                [iv appendFormat:@"%s ", ivar_getName(ivars[k])];
-            }
-            free(ivars);
-            CLlog(@"      ivars: %@", iv);
+            NSString *cls = NSStringFromClass([b class]);
+            NSInteger tag = b.tag;
+            UIImage *glyph = nil;
+            @try { glyph = [b valueForKey:@"_glyphImage"]; } @catch (__unused NSException *e) {}
+            NSString *gdesc = glyph ? [NSString stringWithFormat:@"%.0fx%.0f", glyph.size.width, glyph.size.height] : @"nil";
+            NSString *ident = CLIdentForButton(buttons, i, legacy) ?: @"?";
+            [named addObject:ident.lowercaseString];
+            CLlog(@"  #%lu cls=%@ tag=%ld glyph=%@ ident=%@ frame=%@",
+                  (unsigned long)i, cls, (long)tag, gdesc, ident, NSStringFromCGRect(b.frame));
         }
-    }
 
-    // 归零 transform（CC18 用 transform 定位）
-    for (UIView *b in buttons) {
-        if (!CGAffineTransformIsIdentity(b.transform)) b.transform = CGAffineTransformIdentity;
-    }
+        if (!g_origButtons) g_origButtons = [buttons copy];
 
-    CGRect cb = cluster.bounds;
-    CGFloat bw = 0, bh = 0;
-    for (UIView *b in buttons) {
-        if (b.bounds.size.width > bw) { bw = b.bounds.size.width; bh = b.bounds.size.height; }
-    }
-    if (bw <= 0) return;
-
-    CGFloat margin = 8.0;
-    NSUInteger shown = MIN((NSUInteger)KEEP_COUNT, buttons.count);
-    CGFloat usable = cb.size.width - margin * 2;
-    CGFloat gap = (shown > 1) ? (usable - shown * bw) / (CGFloat)(shown - 1) : 0;
-    if (gap < 2.0) gap = 2.0;
-    CGFloat cy = cb.size.height / 2.0;
-
-    // 决定实际显示顺序
-    NSMutableArray *order = [NSMutableArray array];
-    for (int i = 0; i < KEEP_COUNT; i++) {
-        int idx = gWanted[i];
-        if (idx >= 0 && idx < (int)buttons.count) [order addObject:@(idx)];
-    }
-    if (order.count < shown) {
-        // 未配置时按原顺序补
-        for (NSUInteger i = 0; i < buttons.count && order.count < shown; i++) {
-            if (![order containsObject:@(i)]) [order addObject:@(i)];
-        }
-    }
-
-    gSlotCount = order.count;
-    for (NSUInteger k = 0; k < order.count; k++) {
-        UIView *b = buttons[[order[k] unsignedIntegerValue]];
-        b.hidden = NO;
-        b.alpha = 1.0;
-        CGRect f = CGRectMake(margin + k * (bw + gap), cy - bh / 2.0, bw, bh);
-        b.frame = f;
-        b.userInteractionEnabled = YES;
-        gSlot[k] = f;
-    }
-    // 未选中的隐藏
-    for (UIView *b in buttons) {
-        BOOL keep = NO;
-        for (NSNumber *n in order) if (buttons[[n unsignedIntegerValue]] == b) { keep = YES; break; }
-        if (!keep) b.hidden = YES;
-    }
-}
-
-static UIView *(*orig_hitTest)(id, SEL, CGPoint, UIEvent *);
-static UIView *hook_hitTest(id self, SEL _cmd, CGPoint point, UIEvent *event) {
-    NSArray *buttons = nil;
-    @try { buttons = [self valueForKey:@"_buttons"]; } @catch (__unused NSException *e) {}
-    if (gSlotCount > 0 && [buttons isKindOfClass:NSArray.class]) {
-        UIView *cluster = [buttons.firstObject superview];
-        if (cluster) {
-            CGPoint p = [self convertPoint:point toView:cluster];
-            NSUInteger n = MIN(gSlotCount, buttons.count);
-            for (NSUInteger i = 0; i < n; i++) {
-                UIView *b = buttons[i];
-                if (b.hidden) continue;
-                if (CGRectContainsPoint(CGRectInset(gSlot[i], -4, -4), p)) return b;
+        // 按目标顺序挑选
+        NSMutableArray *picked = [NSMutableArray array];
+        NSMutableIndexSet *used = [NSMutableIndexSet indexSet];
+        for (NSString *want in CLDesiredOrder()) {
+            for (NSUInteger i = 0; i < named.count; i++) {
+                if ([used containsIndex:i]) continue;
+                if ([named[i] containsString:want]) { [picked addObject:buttons[i]]; [used addIndex:i]; break; }
             }
         }
-    }
-    return orig_hitTest ? orig_hitTest(self, _cmd, point, event) : nil;
+        if (picked.count < 5) {
+            // 关键字没匹配上：退回前 5 个，保证数量正确
+            CLlog(@"keyword match only %lu, fallback to first 5", (unsigned long)picked.count);
+            [picked removeAllObjects];
+            for (NSUInteger i = 0; i < buttons.count && picked.count < 5; i++) [picked addObject:buttons[i]];
+        }
+        CLlog(@"picked=%lu order=%@", (unsigned long)picked.count, named);
+
+        [self setValue:[picked copy] forKey:@"_buttons"];
+        // 强制 5 按钮布局分支
+        SEL sg = NSSelectorFromString(@"setGridSize:");
+        if ([self respondsToSelector:sg]) ((void (*)(id, SEL, long long))objc_msgSend)(self, sg, 3);
+        CLlog(@"_buttons set to 5, gridSize=3");
+    } @catch (NSException *e) { CLlog(@"filter fail: %@", e.reason); }
 }
 
-static void CLInstall(void) {
-    Class cls = NSClassFromString(@"C18ConnectivityView");
-    if (!cls) { CLlog(@"C18ConnectivityView not found"); return; }
-    if (orig_layout) return;
-    Method m = class_getInstanceMethod(cls, @selector(layoutSubviews));
-    if (!m) { CLlog(@"no layoutSubviews"); return; }
-    orig_layout = (void (*)(id, SEL))method_getImplementation(m);
-    method_setImplementation(m, (IMP)hook_layout);
-    Method h = class_getInstanceMethod(cls, @selector(hitTest:withEvent:));
-    if (h) {
-        orig_hitTest = (UIView *(*)(id, SEL, CGPoint, UIEvent *))method_getImplementation(h);
-        method_setImplementation(h, (IMP)hook_hitTest);
-    }
-    CLlog(@"hooks installed (layout+hitTest)");
+static void (*orig_initLegacy)(id, SEL, id);
+static id hook_initLegacy(id self, SEL _cmd, id module) {
+    id r = orig_initLegacy ? orig_initLegacy(self, _cmd, module) : nil;
+    if (r) CLFilterButtons(r);
+    return r;
 }
 
 __attribute__((constructor)) static void CLInit(void) {
     @autoreleasepool {
-        CLlog(@"C18ConnLayout v3 loaded");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ CLInstall(); });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (int i = 0; i < 8; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * (i + 1) * NSEC_PER_SEC)),
+                  dispatch_get_main_queue(), ^{
+                    Class cls = NSClassFromString(@"C18ConnectivityView");
+                    if (!cls) return;
+                    Method m = class_getInstanceMethod(cls, NSSelectorFromString(@"initWithLegacyModule:"));
+                    if (!m || orig_initLegacy) return;
+                    orig_initLegacy = (void (*)(id, SEL, id))method_getImplementation(m);
+                    method_setImplementation(m, (IMP)hook_initLegacy);
+                    CLlog(@"initWithLegacyModule REPLACED OK");
+                });
+            }
+        });
     }
 }
