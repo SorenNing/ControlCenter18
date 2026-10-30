@@ -1,0 +1,78 @@
+name: Build CC modules (arm64e fat)
+
+on:
+  push:
+    branches: [ 'main' ]
+    paths:
+      - 'uptime/**'
+      - 'switchdata/**'
+      - '.github/workflows/build-modules.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: UptimeModule
+            src: uptime/UptimeModule.m
+            plist: uptime/Info.plist
+            bundle: UptimeModule.bundle
+          - name: CCSwitchDataModule
+            src: switchdata/CCSwitchDataModule.m
+            plist: switchdata/Info.plist
+            bundle: CCSwitchDataModule.bundle
+          - name: CCSIM
+            src: ccsim/CCSIM.m
+            plist: ccsim/Info.plist
+            bundle: CCSIM.bundle
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid || true
+
+      - name: Build fat dylib
+        env:
+          NAME: ${{ matrix.name }}
+          SRC: ${{ matrix.src }}
+          BUNDLE: ${{ matrix.bundle }}
+        run: |
+          set -euo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          for A in arm64 arm64e; do
+            clang -c -fobjc-arc -O2 -target $A-apple-ios15.0 -arch $A -isysroot "$SDK" \
+                  "$SRC" -o "$NAME.$A.o"
+            ld -arch $A -dylib -platform_version ios 15.0 16.5 -syslibroot "$SDK" \
+               -install_name "/Library/ControlCenter/Bundles/$BUNDLE/$NAME" \
+               -undefined dynamic_lookup -no_implicit_dylibs -ignore_auto_link -dead_strip -fixup_chains \
+               "$NAME.$A.o" -lobjc -lSystem -framework UIKit -framework Foundation \
+               -o "$NAME.$A"
+          done
+          lipo -create "$NAME.arm64" "$NAME.arm64e" -output "$NAME"
+          ldid -S -Cadhoc "$NAME"
+          file "$NAME"
+          lipo -info "$NAME"
+
+      - name: Stage bundle
+        env:
+          NAME: ${{ matrix.name }}
+          PLIST: ${{ matrix.plist }}
+          BUNDLE: ${{ matrix.bundle }}
+        run: |
+          set -euo pipefail
+          mkdir -p "out/$BUNDLE"
+          cp "$PLIST" "out/$BUNDLE/Info.plist"
+          cp "$NAME" "out/$BUNDLE/$NAME"
+          chmod 755 "out/$BUNDLE/$NAME"
+          plutil -p "out/$BUNDLE/Info.plist"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bundle }}
+          path: out/${{ matrix.bundle }}

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>CC系统开机计时</string>
+	<key>CFBundleExecutable</key>
+	<string>UptimeModule</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.mtac.uptimemodule</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>CC系统开机计时</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.1</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>iPhoneOS</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>MinimumOSVersion</key>
+	<string>12.0</string>
+	<key>ModuleSize</key>
+	<dict>
+		<key>columns</key>
+		<string>2</string>
+		<key>rows</key>
+		<string>1</string>
+	</dict>
+	<key>NSPrincipalClass</key>
+	<string>UptimeModule</string>
+</dict>
+</plist>
