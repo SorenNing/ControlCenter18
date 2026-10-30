@@ -44,6 +44,8 @@ jobs:
           BUNDLE: ${{ matrix.bundle }}
         run: |
           set -euo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          echo "== build $NAME =="
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           for A in arm64 arm64e; do
             clang -c -fobjc-arc -O2 -target $A-apple-ios15.0 -arch $A -isysroot "$SDK" \
@@ -58,6 +60,13 @@ jobs:
           ldid -S -Cadhoc "$NAME"
           file "$NAME"
           lipo -info "$NAME"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildlog-${{ matrix.name }}
+          path: /tmp/build.log
 
       - name: Stage bundle
         env:
