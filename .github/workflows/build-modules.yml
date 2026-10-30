@@ -48,13 +48,24 @@ jobs:
           echo "== build $NAME =="
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           mkdir -p build
+          # ControlCenterUIKit stub：只为让产物带上 LC_LOAD_DYLIB，
+          # 保证 dyld 先加载私有框架，CCUIToggleModule 父类才解析得到
+          : > build/stub.c
+          for A in arm64 arm64e; do
+            clang -dynamiclib -target arm64-apple-ios15.0 -arch $A -isysroot "$SDK" build/stub.c \
+                  -install_name /System/Library/PrivateFrameworks/ControlCenterUIKit.framework/ControlCenterUIKit \
+                  -o "build/libCCUIStub.$A.dylib"
+          done
+          lipo -create build/libCCUIStub.arm64.dylib build/libCCUIStub.arm64e.dylib -output build/libCCUIStub.dylib
           for A in arm64 arm64e; do
             clang -c -fobjc-arc -O2 -target $A-apple-ios15.0 -arch $A -isysroot "$SDK" \
                   "$SRC" -o "build/$NAME.$A.o"
             ld -arch $A -dylib -platform_version ios 15.0 16.5 -syslibroot "$SDK" \
-               -install_name "/Library/ControlCenter/Bundles/$BUNDLE/$NAME" \
-               -undefined dynamic_lookup -no_implicit_dylibs -ignore_auto_link -dead_strip -fixup_chains \
-               "build/$NAME.$A.o" -lobjc -lSystem -framework UIKit -framework Foundation \
+               -install_name "@loader_path/$NAME" \
+               -rpath @loader_path/.jbroot/Library/Frameworks \
+               -rpath @loader_path/.jbroot/usr/lib \
+               -undefined dynamic_lookup -dead_strip -fixup_chains \
+               "build/$NAME.$A.o" -Lbuild -lCCUIStub -lobjc -lSystem -framework UIKit -framework Foundation \
                -o "build/$NAME.$A"
           done
           lipo -create "build/$NAME.arm64" "build/$NAME.arm64e" -output "build/$NAME"
