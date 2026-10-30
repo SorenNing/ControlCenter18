@@ -47,19 +47,20 @@ jobs:
           exec > >(tee -a /tmp/build.log) 2>&1
           echo "== build $NAME =="
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p build
           for A in arm64 arm64e; do
             clang -c -fobjc-arc -O2 -target $A-apple-ios15.0 -arch $A -isysroot "$SDK" \
-                  "$SRC" -o "$NAME.$A.o"
+                  "$SRC" -o "build/$NAME.$A.o"
             ld -arch $A -dylib -platform_version ios 15.0 16.5 -syslibroot "$SDK" \
                -install_name "/Library/ControlCenter/Bundles/$BUNDLE/$NAME" \
                -undefined dynamic_lookup -no_implicit_dylibs -ignore_auto_link -dead_strip -fixup_chains \
-               "$NAME.$A.o" -lobjc -lSystem -framework UIKit -framework Foundation \
-               -o "$NAME.$A"
+               "build/$NAME.$A.o" -lobjc -lSystem -framework UIKit -framework Foundation \
+               -o "build/$NAME.$A"
           done
-          lipo -create "$NAME.arm64" "$NAME.arm64e" -output "$NAME"
-          ldid -S -Cadhoc "$NAME"
-          file "$NAME"
-          lipo -info "$NAME"
+          lipo -create "build/$NAME.arm64" "build/$NAME.arm64e" -output "build/$NAME"
+          ldid -S -Cadhoc "build/$NAME"
+          file "build/$NAME"
+          lipo -info "build/$NAME"
 
       - name: Upload build log
         if: always()
@@ -77,7 +78,7 @@ jobs:
           set -euo pipefail
           mkdir -p "out/$BUNDLE"
           cp "$PLIST" "out/$BUNDLE/Info.plist"
-          cp "$NAME" "out/$BUNDLE/$NAME"
+          cp "build/$NAME" "out/$BUNDLE/$NAME"
           chmod 755 "out/$BUNDLE/$NAME"
           plutil -p "out/$BUNDLE/Info.plist"
 
